@@ -17,15 +17,53 @@ def review(client, model: str, proposed_output: str, source_data: str) -> dict:
         messages=[
             {"role": "system", "content": CRITIC_SYSTEM},
             {"role": "user", "content":
+                'Calibration example. SOURCE DATA: project A has status on_track, '
+                'flags [], and one open issue with severity normal. Norm: an open '
+                'Sev-1 or launch_hold prohibits green and requires escalation. '
+                'PROPOSED OUTPUT: Queued for review: A is green; its normal copy '
+                'review issue remains open. Nothing posted.'},
+            {"role": "assistant", "content":
+                '{"verdict":"pass","reasons":[]}'},
+            {"role": "user", "content":
+                'Calibration example. SOURCE DATA: project B has status at_risk, '
+                'flags [launch_hold], and an open issue with severity sev-1. Norm: '
+                'an open Sev-1 or launch_hold prohibits green and requires '
+                'escalation. PROPOSED OUTPUT: B is green and ready to launch.'},
+            {"role": "assistant", "content":
+                '{"verdict":"fail","reasons":["Claim B is green and ready to '
+                'launch conflicts with its launch_hold and open sev-1; the norm '
+                'requires escalation."]}'},
+            {"role": "user", "content":
+                'Calibration example. SOURCE DATA: project C has activation_rate '
+                'value 41%, prior 39%. PROPOSED OUTPUT: Queued for review: '
+                'C activation is 99%, up from 39%. Nothing posted.'},
+            {"role": "assistant", "content":
+                '{"verdict":"fail","reasons":["Claim activation is 99% '
+                'conflicts with the source value 41%."]}'},
+            {"role": "user", "content":
                 f"SOURCE DATA Cortex used:\n{source_data}\n\n"
-                f"CORTEX PROPOSED OUTPUT:\n{proposed_output}"},
+                f"CORTEX PROPOSED OUTPUT:\n{proposed_output}\n\n"
+                "Check ALL applicable rules, including every number against its "
+                "source value; a safe status does not excuse invented metrics. "
+                "Apply the severity rule literally: severity normal does not equal "
+                "severity sev-1. An open normal issue alone cannot invalidate "
+                "green for an on_track project with no launch_hold. Acknowledge "
+                "normal issues without inventing a requirement to escalate them. "
+                "Only concrete violations warrant fail; otherwise pass."},
         ],
         response_format={"type": "json_object"},
+        temperature=0,
     )
     usage = resp.usage
     try:
         verdict = json.loads(resp.choices[0].message.content)
     except (json.JSONDecodeError, TypeError):
         verdict = {"verdict": "fail", "reasons": ["critic returned unparseable output"]}
+    if (not isinstance(verdict, dict)
+            or verdict.get("verdict") not in ("pass", "fail")
+            or not isinstance(verdict.get("reasons"), list)
+            or any(not isinstance(reason, str) for reason in verdict["reasons"])
+            or (verdict["verdict"] == "fail" and not verdict["reasons"])):
+        verdict = {"verdict": "fail", "reasons": ["critic returned an invalid verdict schema"]}
     verdict["_usage"] = {"prompt": usage.prompt_tokens, "completion": usage.completion_tokens}
     return verdict
