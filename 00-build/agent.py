@@ -12,8 +12,9 @@ Usage (ask your coding agent to run these for you, or run them yourself):
     python agent.py missing-data   # the stuck/escalate case
     python agent.py jailbreak       # the prompt-injection refusal case
 
-Every run ends by showing the drafted status update in a FINAL STATUS UPDATE block
-(or LAST DRAFT, held, if a bound trips), and saves it to run-output/. That file is
+Every CLI run saves its full trace to a timestamped file in run-output/ and prints
+only the result and file paths. The trace includes a FINAL STATUS UPDATE block
+(or LAST DRAFT, held, if a bound trips). The draft is also saved separately. That file is
 always a draft held for a human, it is never posted, there is no publish tool.
 
 Requires OPENAI_API_KEY in your environment (see .env.example). Model and bounds
@@ -26,15 +27,22 @@ client) so a grader can see the machinery. Keep the bounds explicit if you rewor
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
+import traceback
+import time
+from contextlib import redirect_stdout, redirect_stderr
+from datetime import datetime, timezone
 from pathlib import Path
 
 from openai import OpenAI
 
 import tools
 from critic import review
-from prompts import CORTEX_SYSTEM
+from prompts import CORTEX_SYSTEM, DRAFT_FORMAT
+from loop_state import RunStopped, SelectionHistory, deadline, parse_output, render_output
+from model_trace import complete, LOGGER
 
 try:  # load .env if python-dotenv is installed; harmless if it isn't
     from dotenv import load_dotenv
@@ -48,7 +56,9 @@ MODEL = os.environ.get("CORTEX_MODEL", "gpt-4o-mini")
 # The validator needs reliable rule following independently of the drafter.
 CRITIC_MODEL = os.environ.get("CORTEX_CRITIC_MODEL", "gpt-4.1-mini")
 MAX_ITERATIONS = int(os.environ.get("CORTEX_MAX_ITERATIONS", "8"))
-MAX_REVISIONS = int(os.environ.get("CORTEX_MAX_REVISIONS", "2"))
+# The approved M2 policy supersedes the older .env revision setting.
+MAX_REVISIONS = 3
+MAX_RUN_SECONDS = 300
 COST_CAP_USD = float(os.environ.get("CORTEX_COST_CAP_USD", "0.50"))
 MAX_QUEUE_ITEMS = int(os.environ.get("CORTEX_MAX_QUEUE_ITEMS", "10"))
 # Rough $ per 1M tokens for your chosen model, set to match its pricing.
@@ -142,91 +152,203 @@ def emit_deliverable(which: str, draft: str, *, accepted: bool,
 
 
 def run(which: str = "happy") -> None:
-    client = OpenAI()
+    # No SDK retries: a retry must not silently extend the overall deadline.
+    client = OpenAI(max_retries=0)
     bounds = Bounds()
-    task = tools.get_task(which)
-    if "error" in task:
-        print(task)
-        return
+    started = time.monotonic()
+    history = SelectionHistory()
+    output = None
+    previous_output = ""
+    latest_text = ""
+    wording_only_count = 0
+    accepted = False
+    reason = "run did not complete"
 
-    banner(f"CORTEX RUN, fixture: task-{which}  (auto-queue cap {MAX_QUEUE_ITEMS} items)")
-    print(task["body"])
-
-    messages = [
-        {"role": "system", "content": CORTEX_SYSTEM},
-        {"role": "user", "content": f"PM task brief:\n\n{task['body']}"},
-    ]
-    source_log: list[str] = [task["body"]]
-    revisions = 0
-    last_draft = ""
-
-    for step in range(1, MAX_ITERATIONS + 1):
+    def check_bounds():
+        if time.monotonic() - started >= MAX_RUN_SECONDS:
+            raise RunStopped(f"time limit ({MAX_RUN_SECONDS} seconds) reached")
         if bounds.over_cap():
-            reason = f"cost cap ${COST_CAP_USD} hit at ${bounds.cost:.4f}"
-            banner(f"BOUND TRIPPED, {reason}. Halting and escalating to a human.")
-            emit_deliverable(which, last_draft, accepted=False,
-                             reason=reason, cost=bounds.cost)
-            return
+            raise RunStopped(f"cost cap ${COST_CAP_USD} reached at ${bounds.cost:.4f}")
 
-        resp = client.chat.completions.create(
-            model=MODEL, messages=messages, tools=TOOL_SCHEMAS)
-        bounds.add(resp.usage)
-        msg = resp.choices[0].message
+    def draft_call(**request):
+        check_bounds()
+        remaining = MAX_RUN_SECONDS - (time.monotonic() - started)
+        response = complete(client.with_options(timeout=remaining), role="drafter", **request)
+        bounds.add(response.usage)
+        check_bounds()
+        return response.choices[0].message
 
-        if msg.tool_calls:
-            messages.append(msg)
-            for call in msg.tool_calls:
-                fn = call.function.name
-                args = json.loads(call.function.arguments or "{}")
-                result = tools.TOOLS[fn](**args)
-                source_log.append(f"{fn}({args}) -> {json.dumps(result)}")
-                print(f"\n[step {step}] TOOL {fn}({args})")
-                print(f"          -> {json.dumps(result)[:300]}")
-                messages.append({"role": "tool", "tool_call_id": call.id,
-                                 "content": json.dumps(result)})
-            continue
+    try:
+        with deadline(MAX_RUN_SECONDS):
+            task = tools.get_task(which)
+            if "error" in task:
+                raise RunStopped(task["error"])
+            print(task["body"])
+            messages = [
+                {"role": "system", "content": CORTEX_SYSTEM + "\n" + DRAFT_FORMAT},
+                {"role": "user", "content": f"PM task brief:\n{task['body']}"},
+            ]
+            source_log = [task["body"]]
+            project_id = ""
+            # Original tool-driven flow: Cortex retrieves context as needed and
+            # produces its initial output in the same conversation.
+            read_schemas = [s for s in TOOL_SCHEMAS if s["function"]["name"] != "propose_stories"]
+            read_names = {s["function"]["name"] for s in read_schemas}
+            print("PHASE: retrieve context and produce initial output")
+            for turn in range(MAX_ITERATIONS):
+                msg = draft_call(model=MODEL, messages=messages, tools=read_schemas,
+                                 response_format={"type": "json_object"})
+                if not msg.tool_calls:
+                    break
+                messages.append(msg)
+                for call in msg.tool_calls:
+                    check_bounds()
+                    fn = call.function.name
+                    if fn not in read_names:
+                        raise RunStopped(f"tool {fn} is not allowed during evidence collection")
+                    args = json.loads(call.function.arguments or "{}")
+                    result = tools.TOOLS[fn](**args)
+                    print(f"TOOL {fn}({args})\n{json.dumps(result, indent=2)}")
+                    source_log.append(f"{fn}({args}) -> {json.dumps(result)}")
+                    messages.append({"role": "tool", "tool_call_id": call.id,
+                                     "content": json.dumps(result)})
+                    if fn == "get_project" and not result.get("error"):
+                        project_id = result["project_id"]
+                    if result.get("error"):
+                        raise RunStopped(f"required data unavailable: {fn}: {result['error']}")
+                    # These source flags cannot be overridden by a draft or critic.
+                    if fn == "get_project" and "launch_hold" in result.get("flags", []):
+                        raise RunStopped("requested project has a launch hold")
+                    if fn == "get_activity" and any(
+                        item.get("severity") == "sev-1" for item in result.get("activity", [])
+                    ):
+                        raise RunStopped("requested project has an open Sev-1")
+            else:
+                raise RunStopped(f"data-collection safety cap ({MAX_ITERATIONS} calls) reached")
 
-        # No tool calls => Cortex produced a proposed output. Validate it.
-        proposed = msg.content or ""
-        last_draft = proposed
-        print(f"\n[step {step}] PROPOSED OUTPUT:\n{proposed}")
+            evidence = "\n".join(source_log)
+            print("PHASE: initial output ready; revisions use existing evidence only")
+            revisions = 0
+            comparison_followups = 0
+            initial_message = msg
+            while True:
+                if initial_message is not None:
+                    msg = initial_message
+                    initial_message = None
+                else:
+                    msg = draft_call(model=MODEL, messages=messages,
+                                     response_format={"type": "json_object"})
+                latest_text = msg.content or ""
+                print(f"DRAFT RESPONSE (revision {revisions}/{MAX_REVISIONS}):\n{latest_text}")
+                try:
+                    candidate = parse_output(latest_text)
+                except (ValueError, TypeError) as error:
+                    # An invalid envelope never reaches success or selection tracking.
+                    raise RunStopped(f"invalid draft structure: {error}") from error
+                output = candidate
+                history.observe(output)
+                if output["needs_new_data"]:
+                    raise RunStopped("new evidence required: " + output["reason"])
+                if output["status"] == "escalate":
+                    # Critic still checks an escalation for confidentiality before release.
+                    pass
+                elif output["status"] == "compare":
+                    if not history.comparisons or comparison_followups >= 1:
+                        raise RunStopped("selection unresolved after 2 comparison opportunities")
+                    comparison_followups += 1
+                    messages.extend([
+                        {"role": "assistant", "content": latest_text},
+                        {"role": "user", "content": "Make the second comparison using frozen evidence. "
+                         "Resolve selection or escalate. Do not retrieve new data."},
+                    ])
+                    continue
 
-        banner("CRITIC, independent validation")
-        verdict = review(client, CRITIC_MODEL, proposed, "\n".join(source_log))
-        # Estimate critic spend too.
-        bounds.cost += (verdict["_usage"]["prompt"] * CRITIC_PRICE_IN
-                        + verdict["_usage"]["completion"] * CRITIC_PRICE_OUT) / 1_000_000
-        print(json.dumps({k: v for k, v in verdict.items() if k != "_usage"}, indent=2))
+                check_bounds()
+                verdict = review(client.with_options(timeout=MAX_RUN_SECONDS - (time.monotonic() - started)),
+                                 CRITIC_MODEL, latest_text, evidence, previous_output)
+                bounds.cost += (verdict["_usage"]["prompt"] * CRITIC_PRICE_IN
+                                + verdict["_usage"]["completion"] * CRITIC_PRICE_OUT) / 1_000_000
+                print("CRITIC: " + json.dumps({k: v for k, v in verdict.items() if k != "_usage"}))
+                check_bounds()
+                if previous_output:
+                    wording_only_count = wording_only_count + 1 if verdict["wording_only"] else 0
+                if wording_only_count >= 2:
+                    raise RunStopped("2 consecutive wording-only revisions")
+                if output["status"] == "escalate":
+                    if verdict["verdict"] != "pass":
+                        raise RunStopped("critic held escalation: " + "; ".join(verdict["reasons"]))
+                    raise RunStopped(output["reason"])
+                if verdict["verdict"] == "pass":
+                    check_bounds()
+                    if not project_id:
+                        raise RunStopped("requested project record was not collected")
+                    result = tools.propose_stories(
+                        project_id=project_id,
+                        stories=[c["title"] for c in output["candidates"] if c["id"] in output["selected"]])
+                    print("STORY PROPOSAL: " + json.dumps(result))
+                    if result.get("status") != "queued_for_approval":
+                        raise RunStopped("story proposal rejected: " + json.dumps(result))
+                    accepted = True
+                    reason = "critic passed; output queued for human review"
+                    break
+                if revisions >= MAX_REVISIONS:
+                    raise RunStopped("3 revisions exhausted; critic still rejects output")
+                previous_output = latest_text
+                revisions += 1
+                messages.extend([
+                    {"role": "assistant", "content": latest_text},
+                    {"role": "user", "content": "Revise this output using ONLY frozen evidence. "
+                     "No retrieval or restarting. Critic feedback: " + json.dumps(verdict["reasons"])},
+                ])
+    except RunStopped as stop:
+        accepted = False
+        reason = str(stop)
+    except Exception as error:
+        accepted = False
+        reason = (f"time limit ({MAX_RUN_SECONDS} seconds) reached"
+                  if time.monotonic() - started >= MAX_RUN_SECONDS
+                  else f"run error: {type(error).__name__}: {error}")
+        traceback.print_exc()
+    finally:
+        print(f"STOP: {reason}; elapsed {time.monotonic() - started:.2f}s; estimated cost ${bounds.cost:.6f}")
+        emit_deliverable(which, render_output(output, history), accepted=accepted,
+                         reason=reason, cost=bounds.cost)
 
-        if verdict["verdict"] == "pass":
-            banner(f"HITL CHECKPOINT, status update + any proposed stories queued for "
-                   f"your review. Nothing posted, no commitments made. "
-                   f"Run cost ≈ ${bounds.cost:.4f}")
-            emit_deliverable(which, proposed, accepted=True,
-                             reason="validator passed", cost=bounds.cost)
-            return
 
-        if revisions >= MAX_REVISIONS:
-            reason = f"validator rejected {MAX_REVISIONS}x (revision cap)"
-            banner(f"REVISION CAP hit ({MAX_REVISIONS}). Escalating to a human "
-                   f"instead of looping. Run cost ≈ ${bounds.cost:.4f}")
-            emit_deliverable(which, last_draft, accepted=False,
-                             reason=reason, cost=bounds.cost)
-            return
-
-        revisions += 1
-        print(f"\n-> critic rejected; revision {revisions}/{MAX_REVISIONS}")
-        messages.append(msg)
-        messages.append({"role": "user", "content":
-                         "A validator rejected that for these reasons: "
-                         f"{verdict['reasons']}. Fix it or escalate."})
-
-    banner(f"MAX ITERATIONS ({MAX_ITERATIONS}) reached without finishing. "
-           f"Escalating. Run cost ≈ ${bounds.cost:.4f}")
-    emit_deliverable(which, last_draft, accepted=False,
-                     reason=f"max iterations ({MAX_ITERATIONS}) reached",
-                     cost=bounds.cost)
+def run_to_file(which: str = "happy") -> int:
+    """Keep each CLI run's trace, including errors, out of terminal scrollback."""
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    trace_path = OUTPUT_DIR / f"trace-{stamp}.log"
+    failed = False
+    with trace_path.open("x", encoding="utf-8") as trace:
+        handler = logging.StreamHandler(trace)
+        old_level = LOGGER.level
+        old_propagate = LOGGER.propagate
+        LOGGER.setLevel(logging.INFO)
+        LOGGER.propagate = False
+        LOGGER.addHandler(handler)
+        try:
+            with redirect_stdout(trace), redirect_stderr(trace):
+                print(f"Cortex trace (UTC): {stamp}; fixture: {which}")
+                print(f"Drafter: {MODEL}; critic: {CRITIC_MODEL}")
+                print(f"Bounds: collection calls={MAX_ITERATIONS}, revisions={MAX_REVISIONS}, "
+                      f"seconds={MAX_RUN_SECONDS}, "
+                      f"cost=${COST_CAP_USD}, queue={MAX_QUEUE_ITEMS}")
+                print("Records observable API payloads, tool results and checks; "
+                      "not private model reasoning. Client credentials are not logged.")
+                try:
+                    run(which)
+                except Exception:
+                    failed = True
+                    traceback.print_exc()
+        finally:
+            LOGGER.removeHandler(handler)
+            LOGGER.setLevel(old_level)
+            LOGGER.propagate = old_propagate
+    print(f"{'Run failed; see trace' if failed else 'Run finished; see trace'}: {trace_path}")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    run(sys.argv[1] if len(sys.argv) > 1 else "happy")
+    sys.exit(run_to_file(sys.argv[1] if len(sys.argv) > 1 else "happy"))

@@ -8,11 +8,13 @@ from __future__ import annotations
 import json
 
 from prompts import CRITIC_SYSTEM
+from model_trace import complete
 
 
-def review(client, model: str, proposed_output: str, source_data: str) -> dict:
+def review(client, model: str, proposed_output: str, source_data: str,
+           previous_output: str = "") -> dict:
     """Return {"verdict": "pass"|"fail", "reasons": [...]} for a proposed output."""
-    resp = client.chat.completions.create(
+    resp = complete(client, role="critic",
         model=model,
         messages=[
             {"role": "system", "content": CRITIC_SYSTEM},
@@ -43,6 +45,17 @@ def review(client, model: str, proposed_output: str, source_data: str) -> dict:
             {"role": "user", "content":
                 f"SOURCE DATA Cortex used:\n{source_data}\n\n"
                 f"CORTEX PROPOSED OUTPUT:\n{proposed_output}\n\n"
+                f"PREVIOUS OUTPUT (if any):\n{previous_output}\n\n"
+                "For a structured draft, verify exactly two distinct selected candidate IDs, "
+                "all viable in-scope candidates represented, grounded selection and omission "
+                "reasons, and both selected stories included in the draft. Escalations need "
+                "not meet draft requirements. For status escalate apply the ESCALATE rules, "
+                "even though the output is JSON rather than text prefixed ESCALATE. "
+                "Check stable candidate IDs against the previous output and reject unexplained "
+                "candidate identity changes. If a previous output is supplied, also return "
+                "wording_only: true or false. True means only language changed: no changes "
+                "to facts, selection, substantive reasons, risk, or escalation decisions. "
+                "If there is no previous output, return wording_only: false. "
                 "Check ALL applicable rules, including every number against its "
                 "source value; a safe status does not excuse invented metrics. "
                 "Apply the severity rule literally: severity normal does not equal "
@@ -66,4 +79,7 @@ def review(client, model: str, proposed_output: str, source_data: str) -> dict:
             or (verdict["verdict"] == "fail" and not verdict["reasons"])):
         verdict = {"verdict": "fail", "reasons": ["critic returned an invalid verdict schema"]}
     verdict["_usage"] = {"prompt": usage.prompt_tokens, "completion": usage.completion_tokens}
+    if type(verdict.get("wording_only")) is not bool:
+        verdict = {"verdict": "fail", "reasons": ["critic omitted wording-only assessment"],
+                   "wording_only": False, "_usage": verdict["_usage"]}
     return verdict

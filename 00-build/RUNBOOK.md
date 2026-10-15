@@ -51,25 +51,57 @@ python agent.py missing-data # stuck/escalate
 python agent.py jailbreak    # injection refusal
 ```
 
-> Each run prints the full trace to your terminal AND ends with the drafted status
+> Each run saves the full trace to a timestamped `run-output/trace-*.log` file and
+> prints only a short completion message and its path. The log includes complete
+> drafter and critic request/response payloads, tool results, token usage, estimated
+> cost, and the stopping point. It records observable activity, not private model
+> reasoning; client credentials and HTTP authorization headers are not logged.
+> The trace ends with the drafted status
 > update in a clear `FINAL STATUS UPDATE` (or, on an escalation, `LAST DRAFT (held)`)
 > block, also saved to `00-build/run-output/status-update-<task>.md` for your review.
 > That saved file is always a **draft, held for a human, never posted** (there is no
-> publish tool). To capture the whole trace too, redirect it:
-> `python agent.py | tee happy-run.txt`. (Your module deliverables, like
+> publish tool). To inspect how the draft was produced,
+> open the reported `run-output/trace-*.log` file. (Your module deliverables, like
 > `agent-line-map.md`, are files you edit and commit, separate from these runs; the
 > `run-output/` drafts are git-ignored.)
+
+### M2 run behavior
+
+The agent uses its original tool-driven flow to retrieve context as needed and
+produce the initial output in the same conversation. Read-tool results are passed
+through in full; selecting two stories does not limit incoming data. There is no
+separate READY stage or mandatory source checklist. After the initial output it
+allows up to **3 revisions based on critic feedback**, using only the evidence
+already collected. Retrieval tools are unavailable during revision. A
+request for new evidence stops the run for human review.
+
+The M2 policy also stops after **300 seconds total**, **2 consecutive wording-only
+revisions**, a requested **third change to the selected story pair**, or **2 unresolved
+selection comparisons**. The critic assesses whether a revision changes only wording;
+the runtime counts that assessment. Semantic assessments still need live validation.
+The code records the initial selection, replacements and reasons, and returns the
+latest output and stopping reason. A successful draft includes two selected stories
+and the other viable candidates considered. Only a critic-approved pair is queued.
+
+The three-revision and time limits are set in `agent.py`; an older
+`CORTEX_MAX_REVISIONS` value in a local `.env` does not override this M2 policy.
+`CORTEX_MAX_ITERATIONS` now caps collection calls only. Long-term history storage,
+retrieval, and a live connector remain future work. The weekly schedule and duplicate
+prevention are design requirements; this CLI does not install a scheduler.
+
+Offline checks (no API calls): `../.venv/bin/python -m unittest discover -s tests -v`
+from `00-build/`.
 
 Then prove the bound trips (ask your coding agent to run these, or run them yourself):
 
 ```bash
-CORTEX_MAX_ITERATIONS=2 python agent.py happy      # hits the iteration cap
+CORTEX_MAX_ITERATIONS=1 python agent.py happy      # hits the collection safety cap
 CORTEX_COST_CAP_USD=0.001 python agent.py happy     # hits the cost cap
-CORTEX_MAX_QUEUE_ITEMS=2 python agent.py happy       # the story batch is rejected + escalated
+CORTEX_MAX_QUEUE_ITEMS=1 python agent.py happy     # selected pair exceeds the queue cap
 ```
 
-> Note: the `=2` override is deliberately set *below* the number of stories the PRD
-> justifies, so the runtime bound (the tool) forces a stop. That is the point, the
+> Note: the queue `=1` override is deliberately below the selected pair of stories,
+> so the runtime bound (the tool) forces a stop. That is the point, the
 > tool's rejection is authoritative and the run escalates rather than quietly
 > committing a flood of work to the tracker.
 
