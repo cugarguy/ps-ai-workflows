@@ -47,7 +47,7 @@ def review(client, model: str, proposed_output: str, source_data: str,
                 f"CORTEX PROPOSED OUTPUT:\n{proposed_output}\n\n"
                 f"PREVIOUS OUTPUT (if any):\n{previous_output}\n\n"
                 "For a structured draft, verify exactly two distinct selected candidate IDs, "
-                "all viable in-scope candidates represented, grounded selection and omission "
+                "other viable stories considered listed, grounded selection and omission "
                 "reasons, and both selected stories included in the draft. Escalations need "
                 "not meet draft requirements. For status escalate apply the ESCALATE rules, "
                 "even though the output is JSON rather than text prefixed ESCALATE. "
