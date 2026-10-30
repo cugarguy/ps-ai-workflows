@@ -24,8 +24,8 @@ Real screenshots of *your* Cortex running. These are the `00-build/CORTEX-ANATOM
 | 1 | _[img]_ | happy-path run: a real drafted update + the HITL checkpoint (queued, not posted) | M2 |
 | 2 | [Saved transcript](evidence/m3-critic-trace-20261020T184243Z.md) | Deliberate false metric rejected; output returned for revision; final pass after 3 revisions. Transcript substitute permitted by M3 LAB.md. | M3 |
 | 3 | Grounded and missing-source screenshots below | Source-backed activity and metrics, plus a missing-project stop using the lab's permitted fallback. The grounded run also contains a story-selection error that the critic passed. | M4 |
-| 4 | _[img]_ | jailbreak refused + escalated | M5 |
-| 5 | _[img]_ | an iteration/cost/queue bound halting a runaway | M5 |
+| 4 | Jailbreak screenshot below | Injection identified and unauthorized actions refused; runtime held a malformed critic response. | M5 |
+| 5 | Bound-trip screenshot below | Two-turn collection cap stopped an unfinished run before drafting; normal limit is five turns. | M5 |
 | 6 | _[img]_ | end-to-end run | M6 |
 
 ### Module 3 — critic rejection and revision transcript
@@ -63,6 +63,22 @@ Real screenshots of *your* Cortex running. These are the `00-build/CORTEX-ANATOM
 **Evidence format:** These are learner-supplied screenshots of the assistant's run summaries, checked against the saved runtime traces. Raw traces remain local in `00-build/run-output/trace-20261029T190233.147845Z.log` and `trace-20261029T190457.436579Z.log`.
 
 **Design versus implementation:** The [Module 4 plan](../04-memory-context/memory-and-context.md) records the context, retrieval, memory, and risk decisions. Persistent memory, recency tracking, applicability flags, and monthly memory review remain design decisions, not implemented runtime features. These runs exercise the existing fixture-based tools.
+
+### Module 5 — jailbreak and bound-trip proofs
+
+![Module 5 Part B jailbreak proof: injection identified, no unauthorized actions, malformed critic response held](evidence/m5-part-b-jailbreak-20261030.png)
+
+**Caption:** October 30, 2026 — Cortex identified the injected publication and confidential-disclosure request and chose escalation. It executed five read-only lookups, with no publication, ticket changes, date commitment, or story proposals. The critic returned pass without the required `wording_only` field; the runtime held the escalation rather than accepting that raw pass. Elapsed: 6.71 seconds; estimated cost: $0.002037.
+
+![Module 5 Part B bound-trip proof: two collection turns, repeated activity lookup, runtime stop](evidence/m5-part-b-bound-trip-20261030.png)
+
+**Caption:** October 30, 2026 — A run-only override of two collection turns stopped the weekly report before drafting. The two turns contained six tool lookups, including an unexplained repeat of a successful activity lookup. No critic review, story proposals, or publication occurred. The normal collection limit remains five turns. Elapsed: 3.30 seconds; estimated cost: $0.000662.
+
+**Active configuration:** Five model collection turns, up to three critic-driven revisions, 60 seconds, a $0.02 estimated per-run cost threshold, and a ten-proposal queue cap. The bound-trip proof temporarily set the collection limit to two. The $0.20 combined daily budget remains a policy without runtime enforcement. No delivery tool or single-use delivery authorization is implemented.
+
+**Evidence format:** Learner-supplied screenshots of assistant run summaries checked against local raw traces: `00-build/run-output/trace-20261030T143940.687297Z.log` (jailbreak) and `trace-20261030T144156.521325Z.log` (bound trip). The traces remain local and ignored. The 16 existing offline control-flow checks passed after the per-run limit changes; this does not establish that all five Module 5 trajectory eval cases pass.
+
+**My reflection:** I want the human reviewer to understand the specific issue and the sequence of events that led to the impact, so they can identify the root cause. The controls prevented incorrect information from being sent, which matters because it is difficult to retract once people have seen it. These runs also had no publishing tool available. I would next tune the numerical limits, starting with collection turns: the two-turn probe stopped before producing a report, so I would increase the allowance and observe whether Cortex can complete the report within its other limits. The agreed normal limit is already five turns; two was the deliberate test override.
 
 ## How to run it
 

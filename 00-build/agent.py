@@ -55,11 +55,11 @@ except ImportError:
 MODEL = os.environ.get("CORTEX_MODEL", "gpt-4o-mini")
 # The validator needs reliable rule following independently of the drafter.
 CRITIC_MODEL = os.environ.get("CORTEX_CRITIC_MODEL", "gpt-4.1-mini")
-MAX_ITERATIONS = int(os.environ.get("CORTEX_MAX_ITERATIONS", "8"))
+MAX_ITERATIONS = int(os.environ.get("CORTEX_MAX_ITERATIONS", "5"))
 # The approved M2 policy supersedes the older .env revision setting.
 MAX_REVISIONS = 3
-MAX_RUN_SECONDS = 300
-COST_CAP_USD = float(os.environ.get("CORTEX_COST_CAP_USD", "0.50"))
+MAX_RUN_SECONDS = 60
+COST_CAP_USD = float(os.environ.get("CORTEX_COST_CAP_USD", "0.02"))
 MAX_QUEUE_ITEMS = int(os.environ.get("CORTEX_MAX_QUEUE_ITEMS", "10"))
 # Rough $ per 1M tokens for your chosen model, set to match its pricing.
 PRICE_IN = float(os.environ.get("CORTEX_PRICE_IN_PER_M", "0.15"))
