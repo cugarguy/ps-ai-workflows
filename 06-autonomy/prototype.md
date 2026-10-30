@@ -6,14 +6,14 @@
 
 ## What it does
 
-_One paragraph: the agent in action, end to end._
+Cortex prepares a weekly leadership update and two proposed backlog stories for human review. It reads a task brief, gathers project state, activity, past updates, roadmap information, and team norms through fixture-based read tools, then drafts an update and explains story selections. An independent critic reviews the supplied evidence and output; Cortex can revise up to three times using the evidence already collected. The runtime stops on limits or unresolved issues and only returns mock queued proposals after a critic pass. No publication, tracker changes, or date commitments are possible through its tools. Recorded runs demonstrate the loop and stop controls, but also show story-selection errors and inconsistent critic responses. Weekly serverless scheduling, persistent memory, and approved delivery are plans rather than deployed features.
 
 ## How you built it
 
-- **Coding agent:** _which one you directed (Claude Code / Cursor / Codex)_
-- **Model + bounds:** _model used, max iterations, cost cap, queue cap_
-- **Repo / config:** _path to your build in `00-build/`_
-- **Live link:** _[shareable URL, optional bonus]_
+- **Coding agent:** Codex, directed by Bob through the guided course labs.
+- **Model + bounds:** `gpt-4o-mini` drafter and `gpt-4.1-mini` critic; five model collection turns, up to three revisions after the initial draft, a 60-second complete-run deadline, a $0.02 estimated per-run cost threshold, and a ten-proposal queue cap. The reporting output selects two stories. The $0.20 combined daily budget remains planned.
+- **Repo / config:** [Cortex build](../00-build/) in [ps-ai-workflows](https://github.com/cugarguy/ps-ai-workflows). Configuration is in a local, ignored `00-build/.env`; the safe template is [`.env.example`](../00-build/.env.example).
+- **Live link:** No production deployment. Runs are local against mock fixtures with live model API calls.
 
 ## Screenshots (required, collected M2 to M6)
 
@@ -21,12 +21,12 @@ Real screenshots of *your* Cortex running. These are the `00-build/CORTEX-ANATOM
 
 | # | Screenshot | What it shows | From |
 |---|---|---|---|
-| 1 | _[img]_ | happy-path run: a real drafted update + the HITL checkpoint (queued, not posted) | M2 |
+| 1 | October 29 grounded-run screenshot below, reused | Real drafted update and human-review stop. Later evidence for the M2 requirement, not a screenshot taken during M2. Story-selection errors remain disclosed. | M2 requirement; captured in M4 |
 | 2 | [Saved transcript](evidence/m3-critic-trace-20261020T184243Z.md) | Deliberate false metric rejected; output returned for revision; final pass after 3 revisions. Transcript substitute permitted by M3 LAB.md. | M3 |
 | 3 | Grounded and missing-source screenshots below | Source-backed activity and metrics, plus a missing-project stop using the lab's permitted fallback. The grounded run also contains a story-selection error that the critic passed. | M4 |
 | 4 | Jailbreak screenshot below | Injection identified and unauthorized actions refused; runtime held a malformed critic response. | M5 |
 | 5 | Bound-trip screenshot below | Two-turn collection cap stopped an unfinished run before drafting; normal limit is five turns. | M5 |
-| 6 | _[img]_ | end-to-end run | M6 |
+| 6 | End-to-end screenshot below | Collection, draft, critic pass, and mock human-review queue under normal limits; substantive limitations disclosed. | M6 |
 
 ### Module 3 — critic rejection and revision transcript
 
@@ -80,6 +80,29 @@ Real screenshots of *your* Cortex running. These are the `00-build/CORTEX-ANATOM
 
 **My reflection:** I want the human reviewer to understand the specific issue and the sequence of events that led to the impact, so they can identify the root cause. The controls prevented incorrect information from being sent, which matters because it is difficult to retract once people have seen it. These runs also had no publishing tool available. I would next tune the numerical limits, starting with collection turns: the two-turn probe stopped before producing a report, so I would increase the allowance and observe whether Cortex can complete the report within its other limits. The agreed normal limit is already five turns; two was the deliberate test override.
 
+### Module 6 — end-to-end capture
+
+![Module 6 end-to-end run under normal limits, with observed content limitations](evidence/m6-end-to-end-20261030.png)
+
+**Caption:** October 30, 2026 — Cortex collected five sources, drafted Northstar's report, received a valid critic pass without revisions, and queued two mock proposals for human approval. The draft used activation 41% → 43%, PRs #820/#823, and issue #825. Elapsed: 10.11 seconds; estimated cost: $0.002323. Nothing was published or created in a tracker.
+
+**Limitations:** The draft described merged work as being in production, which the supplied merge records alone do not establish. The proposed activation-analysis story was not explicitly named in the PRD scope; no other viable candidates or omission reasons were listed. This is an end-to-end execution result, not proof that every task-completion criterion passed.
+
+**Evidence format:** Learner-supplied screenshot of the assistant's run summary, checked against `00-build/run-output/trace-20261030T181725.103215Z.log` (local, ignored). The full draft and API responses remain in that trace. The October 29 grounded-run screenshot above also supplies the missing happy-path/human-review capture; it is labelled with its actual date and limitations.
+
 ## How to run it
 
-_Minimal steps for someone to reproduce the demo (env vars, and the command or the coding-agent prompt you used)._
+Use Python 3.10+ and an environment with the dependencies in `00-build/requirements.txt` installed. From the repository root, copy `00-build/.env.example` to `00-build/.env` if a local configuration does not already exist. Paste an OpenAI API key into the `OPENAI_API_KEY` value, enable API billing, and configure the provider's spend control. Never commit `.env`. The course build uses mock fixture data and makes live model API calls; outputs vary between runs.
+
+With the existing repository virtual environment, run from `00-build/`:
+
+```bash
+../.venv/bin/python agent.py happy
+../.venv/bin/python agent.py missing-data
+../.venv/bin/python agent.py jailbreak
+CORTEX_MAX_ITERATIONS=2 ../.venv/bin/python agent.py happy
+```
+
+Run one command at a time. Each invocation saves a timestamped full trace in `00-build/run-output/` and prints its path. Happy-path drafts are saved as `status-update-happy.md` in that directory; this convenience output is overwritten on later runs, while timestamped traces are retained. Inspect the stop reason rather than assuming a completed command or critic pass means correct output.
+
+The local virtual environment is not committed. On a fresh checkout, create one and install the named requirements before running these commands; see [the build runbook](../00-build/RUNBOOK.md). Offline control-flow checks can be run from the repo root with `.venv/bin/python -m unittest discover -s 00-build/tests -v`. Their pass does not replace the Module 5 trajectory assessments.
